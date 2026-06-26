@@ -1,0 +1,258 @@
+import asyncio
+import io
+import json
+import os
+import secrets
+import socket
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import mss
+from PIL import Image, ImageDraw
+from fastapi import FastAPI, WebSocket
+from fastapi.staticfiles import StaticFiles
+import uvicorn
+
+try:
+    import pyautogui
+    pyautogui.FAILSAFE = False
+    pyautogui.PAUSE = 0
+    HAS_CONTROL = True
+except ImportError:
+    HAS_CONTROL = False
+
+try:
+    import pyperclip
+    HAS_CLIPBOARD = True
+except ImportError:
+    HAS_CLIPBOARD = False
+
+ACCESS_TOKEN: str | None = os.environ.get("SCREENER_TOKEN")
+if "--auth" in sys.argv and not ACCESS_TOKEN:
+    ACCESS_TOKEN = secrets.token_urlsafe(16)
+
+PLATFORM = sys.platform  # "win32" | "darwin" | "linux"
+
+app = FastAPI()
+
+_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mss")
+_sct_local = threading.local()
+
+
+def get_local_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def _draw_cursor(img: Image.Image, x: int, y: int) -> None:
+    d = ImageDraw.Draw(img)
+    # Black outline ring
+    d.ellipse([x - 10, y - 10, x + 10, y + 10], fill=(0, 0, 0))
+    # White body
+    d.ellipse([x - 8, y - 8, x + 8, y + 8], fill=(255, 255, 255))
+    # Blue center dot
+    d.ellipse([x - 3, y - 3, x + 3, y + 3], fill=(0, 140, 255))
+    # Crosshair
+    d.line([x - 13, y, x - 10, y], fill=(0, 0, 0), width=2)
+    d.line([x + 10, y, x + 13, y], fill=(0, 0, 0), width=2)
+    d.line([x, y - 13, x, y - 10], fill=(0, 0, 0), width=2)
+    d.line([x, y + 10, x, y + 13], fill=(0, 0, 0), width=2)
+
+
+def _grab_frame(mon_idx: int, quality: int) -> bytes:
+    if not hasattr(_sct_local, "sct"):
+        _sct_local.sct = mss.MSS()
+    sct = _sct_local.sct
+    mon = sct.monitors[mon_idx]
+    shot = sct.grab(mon)
+    img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+
+    if HAS_CONTROL:
+        try:
+            cx, cy = pyautogui.position()
+            px, py = cx - mon["left"], cy - mon["top"]
+            if 0 <= px < mon["width"] and 0 <= py < mon["height"]:
+                _draw_cursor(img, px, py)
+        except Exception:
+            pass
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
+
+
+def generate_icons() -> None:
+    for size in (180, 192, 512):
+        path = Path(f"static/icon-{size}.png")
+        if path.exists():
+            continue
+        img = Image.new("RGB", (size, size), (8, 8, 14))
+        d = ImageDraw.Draw(img)
+        p = size // 10
+        # Monitor outline
+        d.rounded_rectangle(
+            [p, p, size - p, int(size * 0.68)],
+            radius=size // 15,
+            outline=(0, 150, 230),
+            width=max(3, size // 40),
+        )
+        # Screen glow
+        d.rounded_rectangle(
+            [p * 2, p * 2, size - p * 2, int(size * 0.60)],
+            radius=size // 20,
+            fill=(0, 35, 70),
+        )
+        # Stand
+        cx = size // 2
+        sw = size // 10
+        d.rectangle([cx - sw, int(size * 0.68), cx + sw, int(size * 0.82)], fill=(0, 110, 180))
+        d.rectangle([cx - sw * 2, int(size * 0.82), cx + sw * 2, int(size * 0.88)], fill=(0, 110, 180))
+        img.save(path)
+
+
+@app.websocket("/ws")
+async def stream(ws: WebSocket):
+    if ACCESS_TOKEN:
+        if ws.query_params.get("token") != ACCESS_TOKEN:
+            await ws.close(code=4401)
+            return
+
+    await ws.accept()
+
+    with mss.MSS() as sct:
+        raw_mons = sct.monitors[1:]
+
+    mon_rects = {i + 1: dict(m) for i, m in enumerate(raw_mons)}
+    mons_info = [
+        {"index": i + 1, "width": m["width"], "height": m["height"]}
+        for i, m in enumerate(raw_mons)
+    ]
+    await ws.send_text(json.dumps({
+        "type": "info",
+        "monitors": mons_info,
+        "has_control": HAS_CONTROL,
+        "platform": PLATFORM,
+    }))
+
+    state = {"monitor": 1, "fps": 15, "quality": 70}
+    loop = asyncio.get_event_loop()
+
+    async def send_frames():
+        while True:
+            frame = await loop.run_in_executor(
+                _executor, _grab_frame, state["monitor"], state["quality"]
+            )
+            await ws.send_bytes(frame)
+            await asyncio.sleep(1.0 / state["fps"])
+
+    async def recv_cmds():
+        async for raw in ws.iter_text():
+            try:
+                data = json.loads(raw)
+                t = data.get("type", "settings")
+
+                if t == "settings":
+                    for k in ("monitor", "fps", "quality"):
+                        if k in data:
+                            state[k] = int(data[k])
+
+                elif t == "mouse" and HAS_CONTROL:
+                    rect = mon_rects.get(state["monitor"], mon_rects[1])
+                    action = data.get("action", "move")
+                    mods = data.get("modifiers", [])
+
+                    if action in ("move", "click", "rclick"):
+                        abs_x = int(rect["left"] + float(data["x"]) * rect["width"])
+                        abs_y = int(rect["top"]  + float(data["y"]) * rect["height"])
+                        if action == "move":
+                            pyautogui.moveTo(abs_x, abs_y, _pause=False)
+                        else:
+                            btn = "right" if action == "rclick" else "left"
+                            for m in mods:
+                                pyautogui.keyDown(m)
+                            pyautogui.click(abs_x, abs_y, button=btn, _pause=False)
+                            for m in reversed(mods):
+                                pyautogui.keyUp(m)
+
+                    elif action == "move_rel":
+                        dx, dy = int(data.get("dx", 0)), int(data.get("dy", 0))
+                        cur = pyautogui.position()
+                        sw, sh = pyautogui.size()
+                        pyautogui.moveTo(
+                            max(0, min(sw - 1, cur.x + dx)),
+                            max(0, min(sh - 1, cur.y + dy)),
+                            _pause=False,
+                        )
+
+                    elif action == "scroll":
+                        abs_x = int(rect["left"] + float(data.get("x", 0.5)) * rect["width"])
+                        abs_y = int(rect["top"]  + float(data.get("y", 0.5)) * rect["height"])
+                        pyautogui.scroll(int(data.get("dy", 0)), x=abs_x, y=abs_y)
+
+                elif t == "key" and HAS_CONTROL:
+                    key = data.get("key", "")
+                    if key:
+                        pyautogui.press(key)
+
+                elif t == "hotkey" and HAS_CONTROL:
+                    keys = data.get("keys", [])
+                    if keys:
+                        pyautogui.hotkey(*keys)
+
+                elif t == "type" and HAS_CONTROL:
+                    text = data.get("text", "")
+                    if text:
+                        # ASCII only — use paste for unicode
+                        safe = "".join(c for c in text if ord(c) < 128)
+                        if safe:
+                            pyautogui.typewrite(safe, interval=0.02)
+
+                elif t == "paste" and HAS_CONTROL and HAS_CLIPBOARD:
+                    text = data.get("text", "")
+                    if text:
+                        pyperclip.copy(text)
+                        if PLATFORM == "darwin":
+                            pyautogui.hotkey("command", "v")
+                        else:
+                            pyautogui.hotkey("ctrl", "v")
+
+            except Exception as e:
+                print(f"recv: {e}")
+
+    send_task = asyncio.create_task(send_frames())
+    recv_task = asyncio.create_task(recv_cmds())
+    try:
+        await asyncio.wait([send_task, recv_task], return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        send_task.cancel()
+        recv_task.cancel()
+        await asyncio.gather(send_task, recv_task, return_exceptions=True)
+
+
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
+
+if __name__ == "__main__":
+    generate_icons()
+    ip = get_local_ip()
+    with mss.MSS() as sct:
+        mons = sct.monitors[1:]
+    print(f"\n  Platform : {PLATFORM}")
+    print(f"  Monitors : {len(mons)}")
+    for i, m in enumerate(mons):
+        print(f"    {i+1}: {m['width']}x{m['height']} @ ({m['left']},{m['top']})")
+    print(f"  Control  : {'yes (pyautogui)' if HAS_CONTROL else 'no  — pip install pyautogui'}")
+    if ACCESS_TOKEN:
+        print(f"\n  iPhone URL : http://{ip}:8080/?token={ACCESS_TOKEN}")
+    else:
+        print(f"\n  iPhone URL : http://{ip}:8080")
+        print("  (run with --auth to require a token)")
+    print()
+    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="warning")

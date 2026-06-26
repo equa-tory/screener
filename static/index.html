@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<title>Screener</title>
+<style>
+:root { --safe-b: env(safe-area-inset-bottom, 0px); }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; width: 100vw; height: 100dvh; font-family: -apple-system, sans-serif; }
+canvas { display: block; touch-action: none; }
+
+/* ── Control ring ───────────────────────────────────── */
+#ctrl-ring {
+  position: fixed; inset: 0; pointer-events: none;
+  border: 3px solid #f04; opacity: 0; transition: opacity .2s; z-index: 4;
+}
+#ctrl-ring.on { opacity: 1; }
+
+/* ── Settings panel ─────────────────────────────────── */
+#settings {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 12;
+  background: rgba(10,10,12,.96); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid rgba(255,255,255,.1);
+  padding: 52px 16px 12px;
+  transform: translateY(-100%); transition: transform .25s ease;
+}
+#settings.open { transform: translateY(0); }
+.srow {
+  display: flex; align-items: center; gap: 10px; padding: 9px 0;
+  border-bottom: 1px solid rgba(255,255,255,.07);
+}
+.srow:last-child { border-bottom: none; padding-bottom: 0; }
+.slabel { color: #888; font-size: 13px; min-width: 66px; }
+.srow input[type=range] {
+  flex: 1; accent-color: #0af; height: 4px;
+  -webkit-appearance: none; appearance: none;
+  background: rgba(255,255,255,.18); border-radius: 2px; outline: none;
+}
+.srow input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 22px; height: 22px;
+  background: #0af; border-radius: 50%; cursor: pointer;
+}
+.sval { color: #fff; font-size: 13px; font-family: monospace; min-width: 30px; text-align: right; }
+#fps-display { color: #555; font-size: 12px; font-family: monospace; flex: 1; text-align: right; }
+
+/* Mouse mode toggle in settings */
+.seg { display: flex; border-radius: 7px; overflow: hidden; border: 1px solid rgba(255,255,255,.15); }
+.seg-opt {
+  flex: 1; padding: 6px 10px; font-size: 13px; color: #888; background: transparent;
+  border: none; cursor: pointer; text-align: center; transition: background .15s, color .15s;
+}
+.seg-opt.active { background: rgba(0,140,255,.5); color: #fff; }
+
+/* ── Gear ───────────────────────────────────────────── */
+#gear {
+  position: fixed; top: 10px; right: 10px; z-index: 13;
+  background: rgba(0,0,0,.6); color: #fff;
+  border: 1px solid rgba(255,255,255,.18); border-radius: 8px;
+  width: 36px; height: 36px; font-size: 16px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ── Modifier keys row ──────────────────────────────── */
+#mods {
+  position: fixed; left: 0; right: 0; z-index: 10;
+  display: flex; gap: 6px; padding: 6px 10px;
+  background: rgba(6,6,10,.9); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border-top: 1px solid rgba(255,255,255,.08);
+  transition: transform .2s ease;
+}
+#mods.hidden { display: none; }
+.modbtn {
+  flex: 1; padding: 8px 4px; font-size: 13px; font-weight: 600; text-align: center;
+  background: rgba(255,255,255,.1); color: #ccc;
+  border: 1px solid rgba(255,255,255,.15); border-radius: 7px;
+  cursor: pointer; user-select: none; -webkit-tap-highlight-color: transparent;
+  transition: background .12s;
+}
+.modbtn.active { background: rgba(255,160,0,.55); color: #fff; border-color: #fa0; }
+
+/* ── Bottom bar ─────────────────────────────────────── */
+#bar {
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 10;
+  padding: 8px 10px;
+  padding-bottom: calc(8px + var(--safe-b));
+  display: flex; align-items: center; gap: 8px;
+  background: rgba(8,8,12,.9); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  border-top: 1px solid rgba(255,255,255,.1);
+}
+#mons { display: flex; gap: 6px; flex: 1; min-width: 0; overflow-x: auto; }
+#mons::-webkit-scrollbar { display: none; }
+#bar-right { display: flex; gap: 6px; flex-shrink: 0; }
+
+/* ── Buttons ────────────────────────────────────────── */
+.btn {
+  background: rgba(255,255,255,.1); color: #fff;
+  border: 1px solid rgba(255,255,255,.18); border-radius: 8px;
+  padding: 0 13px; height: 36px; font-size: 14px; cursor: pointer;
+  white-space: nowrap; user-select: none; -webkit-tap-highlight-color: transparent;
+  display: flex; align-items: center; gap: 5px; transition: background .12s;
+}
+.btn:active { background: rgba(255,255,255,.2); }
+.btn.active  { background: rgba(0,140,255,.55); border-color: #0af; }
+.btn.danger  { background: rgba(210,30,30,.55); border-color: #f44; }
+.btn.icon    { padding: 0 10px; font-size: 17px; }
+
+/* ── Paste modal ────────────────────────────────────── */
+#paste-modal {
+  position: fixed; inset: 0; background: rgba(0,0,0,.85); z-index: 30;
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+#paste-modal.hidden { display: none; }
+#paste-box {
+  background: #1a1a22; border: 1px solid rgba(255,255,255,.15);
+  border-radius: 14px; padding: 16px; width: 100%; max-width: 420px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+#paste-hint { color: #888; font-size: 13px; }
+#paste-ta {
+  background: rgba(255,255,255,.06); color: #fff;
+  border: 1px solid rgba(255,255,255,.15); border-radius: 8px;
+  padding: 10px; font-size: 15px; min-height: 100px; resize: none;
+  font-family: -apple-system, sans-serif; outline: none;
+}
+#paste-actions { display: flex; gap: 8px; justify-content: flex-end; }
+#paste-actions button {
+  padding: 8px 18px; border-radius: 8px; font-size: 14px; cursor: pointer; border: none;
+}
+#paste-cancel { background: rgba(255,255,255,.1); color: #aaa; }
+#paste-send   { background: #0af; color: #000; font-weight: 600; }
+
+/* ── Connection overlay ─────────────────────────────── */
+#overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.92); z-index: 20;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  color: #fff; gap: 10px;
+}
+#overlay.hidden { display: none; }
+#ov-title { font-size: 20px; font-weight: 600; }
+#ov-sub   { font-size: 13px; color: rgba(255,255,255,.4); text-align: center; padding: 0 20px; }
+
+/* ── Hidden keyboard input ──────────────────────────── */
+#kbd-input {
+  position: fixed; top: -200px; left: 0; width: 1px; height: 1px; opacity: 0;
+  font-size: 16px; /* prevents iOS auto-zoom */
+}
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+<div id="ctrl-ring"></div>
+
+<!-- Settings panel (slides from top) -->
+<div id="settings">
+  <div class="srow">
+    <span class="slabel">FPS</span>
+    <input type="range" id="fps-r" min="5" max="30" value="15">
+    <span class="sval" id="fps-v">15</span>
+  </div>
+  <div class="srow">
+    <span class="slabel">Quality</span>
+    <input type="range" id="q-r" min="30" max="90" value="70">
+    <span class="sval" id="q-v">70</span>
+  </div>
+  <div class="srow" id="mouse-mode-row" style="display:none">
+    <span class="slabel">Mouse</span>
+    <div class="seg">
+      <button class="seg-opt active" data-mode="absolute">Position</button>
+      <button class="seg-opt" data-mode="relative">Trackpad</button>
+    </div>
+  </div>
+  <div class="srow" id="sens-row" style="display:none">
+    <span class="slabel">Speed</span>
+    <input type="range" id="sens-r" min="0.5" max="5" step="0.5" value="2.5">
+    <span class="sval" id="sens-v">2.5×</span>
+  </div>
+  <div class="srow">
+    <span class="slabel" style="color:#555">Stream</span>
+    <span id="fps-display">–</span>
+  </div>
+</div>
+<button id="gear">⚙</button>
+
+<!-- Modifier keys row (above bottom bar) -->
+<div id="mods" class="hidden"></div>
+
+<!-- Bottom bar -->
+<div id="bar">
+  <div id="mons"></div>
+  <div id="bar-right">
+    <button class="btn icon" id="paste-btn" title="Paste to PC" style="display:none">📋</button>
+    <button class="btn icon" id="kbd-btn" title="Keyboard" style="display:none">⌨</button>
+    <button class="btn" id="ctrl-btn" style="display:none">Control</button>
+  </div>
+</div>
+
+<!-- Paste modal -->
+<div id="paste-modal" class="hidden">
+  <div id="paste-box">
+    <div id="paste-hint">Long-press in the box below → Paste — then tap Send to PC</div>
+    <textarea id="paste-ta" placeholder="Paste here…"></textarea>
+    <div id="paste-actions">
+      <button id="paste-cancel">Cancel</button>
+      <button id="paste-send">Send to PC</button>
+    </div>
+  </div>
+</div>
+
+<!-- Connection overlay -->
+<div id="overlay">
+  <div id="ov-title">Connecting…</div>
+  <div id="ov-sub">Make sure server.py is running on your PC</div>
+</div>
+
+<input id="kbd-input" type="text" inputmode="text"
+  autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+
+<script>
+// ── DOM refs ──────────────────────────────────────────────────────────────────
+const canvas    = document.getElementById('c');
+const ctx       = canvas.getContext('2d');
+const ctrlRing  = document.getElementById('ctrl-ring');
+const bar       = document.getElementById('bar');
+const gear      = document.getElementById('gear');
+const settPanel = document.getElementById('settings');
+const fpsR      = document.getElementById('fps-r');
+const fpsV      = document.getElementById('fps-v');
+const qR        = document.getElementById('q-r');
+const qV        = document.getElementById('q-v');
+const sensR     = document.getElementById('sens-r');
+const sensV     = document.getElementById('sens-v');
+const fpsDisp   = document.getElementById('fps-display');
+const mouseModeRow = document.getElementById('mouse-mode-row');
+const sensRow   = document.getElementById('sens-row');
+const modsEl    = document.getElementById('mods');
+const monsEl    = document.getElementById('mons');
+const pasteBtn  = document.getElementById('paste-btn');
+const kbdBtn    = document.getElementById('kbd-btn');
+const ctrlBtn   = document.getElementById('ctrl-btn');
+const pasteModal= document.getElementById('paste-modal');
+const pasteTA   = document.getElementById('paste-ta');
+const overlay   = document.getElementById('overlay');
+const ovTitle   = document.getElementById('ov-title');
+const ovSub     = document.getElementById('ov-sub');
+const kbdInput  = document.getElementById('kbd-input');
+
+// ── App state ─────────────────────────────────────────────────────────────────
+let scale = 1, tx = 0, ty = 0, fitScale = 1;
+let imgW = 0, imgH = 0, bitmap = null;
+let currentMon = 1;
+let ws = null, reconnectDelay = 1000, authFailed = false;
+let controlMode = false, mouseMode = 'absolute'; // 'absolute' | 'relative'
+let sensitivity = 2.5;
+let hasControl = false, platform = 'win32';
+let settOpen = false, kbdActive = false;
+let activeModifiers = new Set();
+let lastFrameAt = 0, fpsEma = 0;
+
+// Per-platform modifier key definitions
+const MOD_DEFS = {
+  win32:  [{label:'Ctrl',  key:'ctrl'}, {label:'Shift', key:'shift'},
+           {label:'Alt',   key:'alt'},  {label:'⊞',    key:'win'}],
+  darwin: [{label:'⌘',    key:'command'}, {label:'⌥',  key:'alt'},
+           {label:'⇧',    key:'shift'},   {label:'⌃',  key:'ctrl'}],
+  linux:  [{label:'Ctrl',  key:'ctrl'}, {label:'Shift', key:'shift'},
+           {label:'Alt',   key:'alt'},  {label:'Super', key:'super'}],
+};
+
+// Auth token from URL
+const TOKEN = new URLSearchParams(location.search).get('token') || '';
+
+// ── Canvas sizing ─────────────────────────────────────────────────────────────
+function usableH() {
+  return canvas.height - bar.offsetHeight -
+         (modsEl.classList.contains('hidden') ? 0 : modsEl.offsetHeight);
+}
+
+function resize() {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+  positionMods();
+  if (imgW) resetFit(); else draw();
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 120));
+resize();
+
+function positionMods() {
+  modsEl.style.bottom = bar.offsetHeight + 'px';
+}
+
+function resetFit() {
+  fitScale = Math.min(canvas.width / imgW, usableH() / imgH);
+  scale = fitScale;
+  tx = (canvas.width  - imgW * scale) / 2;
+  ty = (usableH() - imgH * scale) / 2;
+  draw();
+}
+
+function clamp() {
+  const uh = usableH();
+  const w = imgW * scale, h = imgH * scale;
+  tx = w <= canvas.width ? (canvas.width - w) / 2 : Math.min(0, Math.max(canvas.width - w, tx));
+  ty = h <= uh           ? (uh - h)           / 2 : Math.min(0, Math.max(uh - h,           ty));
+}
+
+function draw() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (bitmap) {
+    ctx.save();
+    ctx.setTransform(scale, 0, 0, scale, tx, ty);
+    ctx.drawImage(bitmap, 0, 0);
+    ctx.restore();
+  }
+}
+
+// ── Coordinate helpers ────────────────────────────────────────────────────────
+function canvasToMon(cx, cy) {
+  return {
+    x: Math.max(0, Math.min(1, (cx - tx) / (imgW * scale))),
+    y: Math.max(0, Math.min(1, (cy - ty) / (imgH * scale))),
+  };
+}
+
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+// ── Pointer events ────────────────────────────────────────────────────────────
+const ptrs = new Map();
+let pinchDist = null, pinchMidX = 0, pinchMidY = 0;
+let lastTapAt = 0;
+let longPressTimer = null, pointerMoved = false;
+
+canvas.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  canvas.setPointerCapture(e.pointerId);
+  ptrs.set(e.pointerId, {x: e.clientX, y: e.clientY, ox: e.clientX, oy: e.clientY});
+
+  if (ptrs.size === 2) {
+    const [a, b] = [...ptrs.values()];
+    pinchDist = Math.hypot(b.x - a.x, b.y - a.y);
+    pinchMidX = (a.x + b.x) / 2;
+    pinchMidY = (a.y + b.y) / 2;
+  }
+
+  // Double-tap = reset zoom
+  const now = Date.now();
+  if (ptrs.size === 1 && now - lastTapAt < 280) resetFit();
+  lastTapAt = now;
+
+  if (controlMode && ptrs.size === 1) {
+    pointerMoved = false;
+    longPressTimer = setTimeout(() => {
+      if (!pointerMoved) {
+        const pos = canvasToMon(e.clientX, e.clientY);
+        send({type: 'mouse', action: 'rclick', x: pos.x, y: pos.y,
+              modifiers: [...activeModifiers]});
+        clearModifiers();
+        navigator.vibrate && navigator.vibrate(50);
+      }
+    }, 500);
+  }
+}, {passive: false});
+
+canvas.addEventListener('pointermove', e => {
+  e.preventDefault();
+  if (!ptrs.has(e.pointerId)) return;
+
+  const prev = ptrs.get(e.pointerId);
+  const moved = Math.hypot(e.clientX - prev.ox, e.clientY - prev.oy) > 8;
+  if (moved) { pointerMoved = true; clearTimeout(longPressTimer); longPressTimer = null; }
+  ptrs.set(e.pointerId, {x: e.clientX, y: e.clientY, ox: prev.ox, oy: prev.oy});
+
+  if (ptrs.size === 1) {
+    const dx = e.clientX - prev.x;
+    const dy = e.clientY - prev.y;
+
+    if (controlMode) {
+      if (mouseMode === 'absolute') {
+        // Absolute: finger position = cursor position
+        if (moved) {
+          const pos = canvasToMon(e.clientX, e.clientY);
+          send({type: 'mouse', action: 'move', x: pos.x, y: pos.y});
+        }
+      } else {
+        // Relative: delta moves cursor
+        const sdx = Math.round(dx * sensitivity);
+        const sdy = Math.round(dy * sensitivity);
+        if (sdx !== 0 || sdy !== 0) {
+          send({type: 'mouse', action: 'move_rel', dx: sdx, dy: sdy});
+        }
+      }
+    } else {
+      // Pan the view
+      tx += dx; ty += dy;
+      clamp(); draw();
+    }
+  } else if (ptrs.size >= 2) {
+    const [a, b] = [...ptrs.values()];
+    const dist = Math.hypot(b.x - a.x, b.y - a.y);
+    const mx = (a.x + b.x) / 2;
+    const my = (a.y + b.y) / 2;
+    const distDelta = pinchDist > 0 ? Math.abs(dist - pinchDist) / pinchDist : 0;
+
+    if (controlMode && distDelta < 0.04) {
+      // Two fingers moving together = scroll
+      const midDy = my - pinchMidY;
+      const ticks = Math.round(-midDy / 28);
+      if (ticks !== 0) {
+        const pos = canvasToMon(mx, my);
+        send({type: 'mouse', action: 'scroll', dy: ticks, x: pos.x, y: pos.y});
+      }
+    } else {
+      // Pinch-to-zoom (both modes)
+      if (pinchDist && pinchDist > 0) {
+        const ns = Math.max(fitScale, Math.min(12, scale * dist / pinchDist));
+        tx = mx - (mx - tx) * (ns / scale);
+        ty = my - (my - ty) * (ns / scale);
+        scale = ns;
+        clamp(); draw();
+      }
+      pinchDist = dist;
+    }
+    pinchMidX = mx; pinchMidY = my;
+  }
+}, {passive: false});
+
+canvas.addEventListener('pointerup', e => {
+  clearTimeout(longPressTimer); longPressTimer = null;
+  const p = ptrs.get(e.pointerId);
+  ptrs.delete(e.pointerId);
+  if (ptrs.size < 2) pinchDist = null;
+
+  if (controlMode && ptrs.size === 0 && p && !pointerMoved) {
+    const pos = canvasToMon(p.x, p.y);
+    send({type: 'mouse', action: 'click', x: pos.x, y: pos.y,
+          modifiers: [...activeModifiers]});
+    clearModifiers();
+  }
+}, {passive: false});
+
+canvas.addEventListener('pointercancel', e => {
+  clearTimeout(longPressTimer); longPressTimer = null;
+  ptrs.delete(e.pointerId);
+  if (ptrs.size < 2) pinchDist = null;
+});
+
+// Mouse wheel zoom (desktop)
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const f = e.deltaY < 0 ? 1.12 : 0.9;
+  const ns = Math.max(fitScale, Math.min(12, scale * f));
+  tx = e.clientX - (e.clientX - tx) * (ns / scale);
+  ty = e.clientY - (e.clientY - ty) * (ns / scale);
+  scale = ns; clamp(); draw();
+}, {passive: false});
+
+// ── Settings panel ────────────────────────────────────────────────────────────
+gear.addEventListener('click', () => {
+  settOpen = !settOpen;
+  settPanel.classList.toggle('open', settOpen);
+  gear.textContent = settOpen ? '✕' : '⚙';
+});
+canvas.addEventListener('pointerdown', () => {
+  if (settOpen) { settOpen = false; settPanel.classList.remove('open'); gear.textContent = '⚙'; }
+}, {capture: true, passive: true});
+
+fpsR.addEventListener('input', () => { fpsV.textContent = fpsR.value; send({type:'settings', fps:+fpsR.value}); });
+qR.addEventListener('input',   () => { qV.textContent   = qR.value;   send({type:'settings', quality:+qR.value}); });
+sensR.addEventListener('input', () => {
+  sensitivity = +sensR.value;
+  sensV.textContent = sensitivity.toFixed(1) + '×';
+});
+
+// Mouse mode segment control
+document.querySelectorAll('.seg-opt').forEach(btn => {
+  btn.addEventListener('click', () => {
+    mouseMode = btn.dataset.mode;
+    document.querySelectorAll('.seg-opt').forEach(b => b.classList.toggle('active', b === btn));
+    sensRow.style.display = mouseMode === 'relative' ? '' : 'none';
+  });
+});
+
+// ── Modifier keys ─────────────────────────────────────────────────────────────
+function buildModRow(plat) {
+  modsEl.innerHTML = '';
+  const defs = MOD_DEFS[plat] || MOD_DEFS.win32;
+  defs.forEach(({label, key}) => {
+    const btn = document.createElement('button');
+    btn.className = 'modbtn';
+    btn.textContent = label;
+    btn.dataset.key = key;
+    btn.addEventListener('pointerdown', e => e.stopPropagation());
+    btn.addEventListener('click', () => {
+      if (activeModifiers.has(key)) {
+        activeModifiers.delete(key);
+        btn.classList.remove('active');
+      } else {
+        activeModifiers.add(key);
+        btn.classList.add('active');
+      }
+    });
+    modsEl.appendChild(btn);
+  });
+  positionMods();
+}
+
+function clearModifiers() {
+  activeModifiers.clear();
+  modsEl.querySelectorAll('.modbtn').forEach(b => b.classList.remove('active'));
+}
+
+function updateModRow() {
+  const show = hasControl && (controlMode || kbdActive);
+  modsEl.classList.toggle('hidden', !show);
+  positionMods();
+  if (imgW) resetFit();
+}
+
+// ── Keyboard ──────────────────────────────────────────────────────────────────
+const KEY_MAP = {
+  Backspace:'backspace', Enter:'enter', Tab:'tab', Escape:'escape',
+  Delete:'delete', ArrowLeft:'left', ArrowRight:'right', ArrowUp:'up', ArrowDown:'down',
+  Home:'home', End:'end', PageUp:'pageup', PageDown:'pagedown',
+  F1:'f1', F2:'f2', F3:'f3', F4:'f4', F5:'f5', F6:'f6',
+  F7:'f7', F8:'f8', F9:'f9', F10:'f10', F11:'f11', F12:'f12',
+};
+
+kbdInput.addEventListener('keydown', e => {
+  const mappedKey = KEY_MAP[e.key];
+  if (mappedKey) {
+    const mods = [...activeModifiers];
+    if (mods.length > 0) {
+      send({type:'hotkey', keys:[...mods, mappedKey]});
+      clearModifiers();
+    } else {
+      send({type:'key', key: mappedKey});
+    }
+    e.preventDefault();
+  }
+});
+
+kbdInput.addEventListener('input', e => {
+  const text = e.data || kbdInput.value;
+  if (text) {
+    const mods = [...activeModifiers];
+    if (mods.length > 0) {
+      send({type:'hotkey', keys:[...mods, text.toLowerCase()]});
+      clearModifiers();
+    } else {
+      send({type:'type', text});
+    }
+    kbdInput.value = '';
+  }
+});
+
+kbdInput.addEventListener('focus', () => { kbdActive = true;  updateModRow(); });
+kbdInput.addEventListener('blur',  () => { kbdActive = false; updateModRow(); });
+
+kbdBtn.addEventListener('pointerdown', e => e.stopPropagation());
+kbdBtn.addEventListener('click', () => { kbdInput.focus(); });
+
+// ── Paste modal ───────────────────────────────────────────────────────────────
+pasteBtn.addEventListener('pointerdown', e => e.stopPropagation());
+pasteBtn.addEventListener('click', async () => {
+  pasteModal.classList.remove('hidden');
+  pasteTA.value = '';
+  setTimeout(() => pasteTA.focus(), 80);
+  // Try clipboard API (works on HTTPS or localhost)
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) pasteTA.value = text;
+  } catch (_) { /* manual paste on HTTP */ }
+});
+
+document.getElementById('paste-cancel').addEventListener('click', () => {
+  pasteModal.classList.add('hidden');
+});
+document.getElementById('paste-send').addEventListener('click', () => {
+  const text = pasteTA.value;
+  if (text.trim()) send({type:'paste', text});
+  pasteModal.classList.add('hidden');
+});
+
+// ── Control mode ──────────────────────────────────────────────────────────────
+function setControlMode(on) {
+  controlMode = on;
+  ctrlBtn.classList.toggle('danger', on);
+  ctrlBtn.textContent = on ? 'Control ON' : 'Control';
+  ctrlRing.classList.toggle('on', on);
+  canvas.style.cursor = on ? (mouseMode === 'relative' ? 'move' : 'crosshair') : 'grab';
+  updateModRow();
+}
+ctrlBtn.addEventListener('pointerdown', e => e.stopPropagation());
+ctrlBtn.addEventListener('click', () => setControlMode(!controlMode));
+
+// ── Monitor buttons ───────────────────────────────────────────────────────────
+function buildMonitorBtns(monitors) {
+  monsEl.innerHTML = '';
+  monitors.forEach(m => {
+    const btn = document.createElement('button');
+    btn.className = 'btn' + (m.index === currentMon ? ' active' : '');
+    btn.textContent = `Mon ${m.index}`;
+    btn.dataset.idx = m.index;
+    btn.addEventListener('pointerdown', ev => ev.stopPropagation());
+    btn.addEventListener('click', () => {
+      currentMon = m.index;
+      monsEl.querySelectorAll('.btn').forEach(b => b.classList.toggle('active', +b.dataset.idx === currentMon));
+      imgW = m.width; imgH = m.height;
+      resetFit();
+      send({type:'settings', monitor: m.index});
+    });
+    monsEl.appendChild(btn);
+  });
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function connect() {
+  if (authFailed) return;
+  const wsUrl = `ws://${location.host}/ws${TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''}`;
+  ws = new WebSocket(wsUrl);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    overlay.classList.add('hidden');
+    reconnectDelay = 1000;
+  };
+
+  ws.onmessage = async e => {
+    if (typeof e.data === 'string') {
+      const data = JSON.parse(e.data);
+      if (data.type === 'info' && data.monitors.length) {
+        hasControl = !!data.has_control;
+        platform   = data.platform || 'win32';
+
+        // Show/hide control UI
+        ctrlBtn.style.display  = hasControl ? '' : 'none';
+        kbdBtn.style.display   = hasControl ? '' : 'none';
+        pasteBtn.style.display = hasControl ? '' : 'none';
+        if (hasControl) {
+          mouseModeRow.style.display = '';
+          buildModRow(platform);
+        }
+
+        buildMonitorBtns(data.monitors);
+        const first = data.monitors[0];
+        imgW = first.width; imgH = first.height;
+        resetFit();
+      }
+      return;
+    }
+
+    // Binary JPEG frame
+    const now = performance.now();
+    if (lastFrameAt) {
+      const dt = now - lastFrameAt;
+      fpsEma = fpsEma === 0 ? 1000 / dt : fpsEma * 0.85 + (1000 / dt) * 0.15;
+      fpsDisp.textContent = `${Math.round(fpsEma)} fps`;
+    }
+    lastFrameAt = now;
+
+    try {
+      const bmp = await createImageBitmap(new Blob([e.data], {type:'image/jpeg'}));
+      if (bmp.width !== imgW || bmp.height !== imgH) {
+        imgW = bmp.width; imgH = bmp.height; resetFit();
+      }
+      if (bitmap) bitmap.close();
+      bitmap = bmp;
+      draw();
+    } catch (_) {}
+  };
+
+  ws.onclose = e => {
+    if (e.code === 4401) {
+      authFailed = true;
+      ovTitle.textContent = 'Auth failed';
+      ovSub.textContent = 'Add ?token=YOUR_TOKEN to the URL';
+      overlay.classList.remove('hidden');
+      return;
+    }
+    fpsDisp.textContent = '–';
+    overlay.classList.remove('hidden');
+    ovTitle.textContent = `Reconnecting in ${Math.round(reconnectDelay / 1000)}s…`;
+    setTimeout(() => { ovTitle.textContent = 'Connecting…'; connect(); }, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 1.5, 10000);
+  };
+}
+
+connect();
+</script>
+</body>
+</html>
