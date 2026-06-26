@@ -239,12 +239,13 @@ async def stream(ws: WebSocket):
         await asyncio.gather(send_task, recv_task, return_exceptions=True)
 
 
+_IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.heic', '.heif', '.tiff', '.tif'}
+
 @app.post("/upload")
 async def upload_file(file: UploadFile):
     desktop = Path.home() / "Desktop"
     desktop.mkdir(exist_ok=True)
     dest = desktop / (file.filename or "upload")
-    # Avoid overwriting existing files
     stem, suffix = dest.stem, dest.suffix
     n = 1
     while dest.exists():
@@ -252,17 +253,49 @@ async def upload_file(file: UploadFile):
         n += 1
     with dest.open("wb") as f:
         shutil.copyfileobj(file.file, f)
-    # Open on PC so it's immediately accessible
-    try:
+
+    is_image = (
+        suffix.lower() in _IMAGE_EXTS
+        or (file.content_type or "").startswith("image/")
+    )
+    in_clipboard = False
+
+    if is_image:
         if PLATFORM == "win32":
-            os.startfile(dest)
+            try:
+                ps = (
+                    "Add-Type -Assembly System.Windows.Forms;"
+                    "[System.Windows.Forms.Clipboard]::SetImage("
+                    f"[System.Drawing.Image]::FromFile('{dest}'))"
+                )
+                subprocess.run(["powershell", "-Command", ps],
+                               capture_output=True, timeout=8)
+                in_clipboard = True
+            except Exception:
+                pass
         elif PLATFORM == "darwin":
-            subprocess.run(["open", str(dest)])
-        else:
-            subprocess.run(["xdg-open", str(dest)])
-    except Exception:
-        pass
-    return {"saved": dest.name}
+            try:
+                subprocess.run(
+                    ["osascript", "-e",
+                     f'set the clipboard to (read (POSIX file "{dest}") as TIFF picture)'],
+                    capture_output=True, timeout=8,
+                )
+                in_clipboard = True
+            except Exception:
+                pass
+
+    if not in_clipboard:
+        try:
+            if PLATFORM == "win32":
+                os.startfile(dest)
+            elif PLATFORM == "darwin":
+                subprocess.run(["open", str(dest)])
+            else:
+                subprocess.run(["xdg-open", str(dest)])
+        except Exception:
+            pass
+
+    return {"saved": dest.name, "in_clipboard": in_clipboard}
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
@@ -283,4 +316,4 @@ if __name__ == "__main__":
         print(f"\n  iPhone URL : http://{ip}:8080")
         print("  (run with --auth to require a token)")
     print()
-    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="warning")
+    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="warning", ws_ping_interval=None)

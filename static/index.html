@@ -12,8 +12,11 @@
 <style>
 :root { --safe-b: env(safe-area-inset-bottom, 0px); }
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { background: #000; overflow: hidden; width: 100vw; height: 100dvh; font-family: -apple-system, sans-serif; }
+body { background: #000; overflow: hidden; width: 100vw; height: 100dvh; font-family: -apple-system, sans-serif;
+       -webkit-user-select: none; user-select: none; }
 canvas { display: block; touch-action: none; }
+button, label { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+textarea, input, [contenteditable] { -webkit-user-select: text; user-select: text; }
 
 /* ── Control ring ───────────────────────────────────── */
 #ctrl-ring {
@@ -164,10 +167,22 @@ canvas { display: block; touch-action: none; }
 }
 .scroll-btn:active { background: rgba(0,100,200,.6); }
 
+/* ── Image paste zone ───────────────────────────────── */
+#img-paste-area {
+  min-height: 52px; background: rgba(255,255,255,.04);
+  border: 1px dashed rgba(0,170,255,.35); border-radius: 8px;
+  padding: 10px; color: #555; font-size: 13px;
+  text-align: center; outline: none; cursor: text;
+  -webkit-user-select: text; user-select: text;
+}
+#img-paste-area:focus { border-color: rgba(0,170,255,.7); color: #777; }
+#img-paste-area:empty::before { content: attr(data-placeholder); display: block; }
+#img-paste-area img { max-width: 100%; max-height: 110px; border-radius: 4px; display: block; margin: 0 auto; }
+
 /* ── File upload (inside paste modal) ───────────────── */
 #file-divider { color: #444; font-size: 12px; text-align: center; }
 #file-btn {
-  padding: 9px; background: rgba(255,255,255,.06); color: #888;
+  display: block; padding: 9px; background: rgba(255,255,255,.06); color: #888;
   border: 1px dashed rgba(255,255,255,.2); border-radius: 8px;
   font-size: 14px; cursor: pointer; width: 100%; text-align: center;
 }
@@ -217,6 +232,11 @@ canvas { display: block; touch-action: none; }
     <span class="sval" id="sens-v">2.5×</span>
   </div>
   <div class="srow">
+    <span class="slabel">Scroll</span>
+    <input type="range" id="scroll-r" min="1" max="100" value="3">
+    <span class="sval" id="scroll-v">3</span>
+  </div>
+  <div class="srow">
     <span class="slabel" style="color:#555">Stream</span>
     <span id="fps-display">–</span>
   </div>
@@ -239,14 +259,15 @@ canvas { display: block; touch-action: none; }
 <!-- Paste modal -->
 <div id="paste-modal" class="hidden">
   <div id="paste-box">
-    <div id="paste-hint">Long-press in the box below → Paste — then tap Send to PC</div>
-    <textarea id="paste-ta" placeholder="Paste here…"></textarea>
+    <div id="paste-hint">Text: long-press below → Paste → Send. Image: tap image zone → long-press → Paste.</div>
+    <textarea id="paste-ta" placeholder="Paste text here…"></textarea>
     <div id="paste-actions">
       <button id="paste-cancel">Cancel</button>
       <button id="paste-send">Send text to PC</button>
     </div>
-    <div id="file-divider">— or send a file / photo —</div>
-    <button id="file-btn">📁 Choose file or photo</button>
+    <div id="img-paste-area" contenteditable="true" data-placeholder="Tap here → long-press → Paste image from clipboard"></div>
+    <div id="file-divider">— or pick file / photo —</div>
+    <label id="file-btn" for="file-input">📁 Choose file or photo</label>
     <div id="upload-status"></div>
   </div>
 </div>
@@ -296,7 +317,7 @@ let imgW = 0, imgH = 0, bitmap = null;
 let currentMon = 1;
 let ws = null, reconnectDelay = 1000, authFailed = false;
 let controlMode = false, mouseMode = 'absolute'; // 'absolute' | 'relative'
-let sensitivity = 2.5;
+let sensitivity = 2.5, scrollSpeed = 3;
 let hasControl = false, platform = 'win32';
 let settOpen = false, kbdActive = false;
 let activeModifiers = new Set();
@@ -393,7 +414,7 @@ canvas.addEventListener('pointerdown', e => {
 
   // Double-tap = reset zoom
   const now = Date.now();
-  if (ptrs.size === 1 && now - lastTapAt < 280) resetFit();
+  // if (ptrs.size === 1 && now - lastTapAt < 280) resetFit();
   lastTapAt = now;
 
   if (controlMode && ptrs.size === 1) {
@@ -455,7 +476,7 @@ canvas.addEventListener('pointermove', e => {
     if (controlMode && distDelta < scrollThresh) {
       // Fingers moving together without spreading → scroll
       const midDy = my - pinchMidY;
-      const ticks = Math.round(-midDy / 20);
+      const ticks = Math.round(-midDy * scrollSpeed / 20);
       if (ticks !== 0) {
         const pos = canvasToMon(mx, my);
         send({type: 'mouse', action: 'scroll', dy: ticks, x: pos.x, y: pos.y});
@@ -520,6 +541,10 @@ qR.addEventListener('input',   () => { qV.textContent   = qR.value;   send({type
 sensR.addEventListener('input', () => {
   sensitivity = +sensR.value;
   sensV.textContent = sensitivity.toFixed(1) + '×';
+});
+document.getElementById('scroll-r').addEventListener('input', function() {
+  scrollSpeed = +this.value;
+  document.getElementById('scroll-v').textContent = scrollSpeed;
 });
 
 // Mouse mode segment control
@@ -626,6 +651,8 @@ pasteBtn.addEventListener('pointerdown', e => e.stopPropagation());
 pasteBtn.addEventListener('click', async () => {
   pasteModal.classList.remove('hidden');
   pasteTA.value = '';
+  document.getElementById('img-paste-area').innerHTML = '';
+  uploadStatus.textContent = '';
   setTimeout(() => pasteTA.focus(), 80);
   // Try clipboard API (works on HTTPS or localhost)
   try {
@@ -636,6 +663,7 @@ pasteBtn.addEventListener('click', async () => {
 
 document.getElementById('paste-cancel').addEventListener('click', () => {
   pasteModal.classList.add('hidden');
+  document.getElementById('img-paste-area').innerHTML = '';
 });
 document.getElementById('paste-send').addEventListener('click', () => {
   const text = pasteTA.value;
@@ -668,8 +696,8 @@ function stopScroll() { clearInterval(scrollInterval); scrollInterval = null; }
 
 const scrollUpBtn = document.getElementById('scroll-up');
 const scrollDnBtn = document.getElementById('scroll-dn');
-scrollUpBtn.addEventListener('pointerdown', e => { e.stopPropagation(); startScroll(3); });
-scrollDnBtn.addEventListener('pointerdown', e => { e.stopPropagation(); startScroll(-3); });
+scrollUpBtn.addEventListener('pointerdown', e => { e.stopPropagation(); startScroll(scrollSpeed); });
+scrollDnBtn.addEventListener('pointerdown', e => { e.stopPropagation(); startScroll(-scrollSpeed); });
 [scrollUpBtn, scrollDnBtn].forEach(btn => {
   btn.addEventListener('pointerup',    stopScroll);
   btn.addEventListener('pointercancel', stopScroll);
@@ -679,22 +707,54 @@ scrollDnBtn.addEventListener('pointerdown', e => { e.stopPropagation(); startScr
 const fileInput    = document.getElementById('file-input');
 const uploadStatus = document.getElementById('upload-status');
 
-document.getElementById('file-btn').addEventListener('click', () => fileInput.click());
-fileInput.addEventListener('change', async () => {
-  const file = fileInput.files[0];
-  if (!file) return;
-  uploadStatus.textContent = `Uploading ${file.name}…`;
+async function uploadFileToPC(file) {
+  const name = file.name || 'paste.png';
+  uploadStatus.textContent = `Uploading ${name}…`;
   const fd = new FormData();
-  fd.append('file', file);
+  fd.append('file', file, name);
   try {
     const res = await fetch('/upload', {method: 'POST', body: fd});
     const data = await res.json();
-    uploadStatus.textContent = `✓ Saved & opened: ${data.saved}`;
-    setTimeout(() => { uploadStatus.textContent = ''; }, 5000);
-  } catch (err) {
+    if (data.in_clipboard) {
+      // Auto-close — image is in PC clipboard, ready to Ctrl+V
+      setTimeout(() => {
+        pasteModal.classList.add('hidden');
+        imgPasteArea.innerHTML = '';
+        uploadStatus.textContent = '';
+      }, 350);
+    } else {
+      uploadStatus.textContent = `✓ Saved & opened: ${data.saved}`;
+      setTimeout(() => { uploadStatus.textContent = ''; }, 5000);
+    }
+  } catch {
     uploadStatus.textContent = 'Upload failed';
   }
   fileInput.value = '';
+}
+
+fileInput.addEventListener('change', async () => {
+  const file = fileInput.files[0];
+  if (file) await uploadFileToPC(file);
+});
+
+const imgPasteArea = document.getElementById('img-paste-area');
+imgPasteArea.addEventListener('paste', async e => {
+  e.preventDefault();
+  const items = Array.from(e.clipboardData?.items || []);
+  const imgItem = items.find(i => i.type.startsWith('image/'));
+  if (imgItem) {
+    const file = imgItem.getAsFile();
+    if (file) {
+      imgPasteArea.innerHTML = '';
+      const preview = document.createElement('img');
+      preview.src = URL.createObjectURL(file);
+      imgPasteArea.appendChild(preview);
+      await uploadFileToPC(file);
+    }
+    return;
+  }
+  const txtItem = items.find(i => i.type === 'text/plain');
+  if (txtItem) txtItem.getAsString(t => { pasteTA.value = t; imgPasteArea.innerHTML = ''; });
 });
 
 // ── Monitor buttons ───────────────────────────────────────────────────────────
