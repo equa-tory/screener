@@ -31,11 +31,45 @@ try:
 except ImportError:
     HAS_CLIPBOARD = False
 
+try:
+    import sounddevice as sd
+    import numpy as np
+    HAS_AUDIO = True
+except ImportError:
+    HAS_AUDIO = False
+
 ACCESS_TOKEN: str | None = os.environ.get("SCREENER_TOKEN")
 if "--auth" in sys.argv and not ACCESS_TOKEN:
     ACCESS_TOKEN = secrets.token_urlsafe(16)
 
 PLATFORM = sys.platform  # "win32" | "darwin" | "linux"
+
+SETTINGS_FILE = Path("settings.json")
+
+# Windows WASAPI loopback — use default output device as loopback source
+_LOOPBACK_DEV: int | None = None
+if HAS_AUDIO and PLATFORM == "win32":
+    try:
+        _LOOPBACK_DEV = int(sd.default.device[1])
+        _ = sd.WasapiSettings  # confirm it exists
+    except Exception:
+        HAS_AUDIO = False
+else:
+    HAS_AUDIO = False
+
+def _load_settings() -> dict:
+    try:
+        return json.loads(SETTINGS_FILE.read_text())
+    except Exception:
+        return {}
+
+def _save_settings(s: dict) -> None:
+    try:
+        SETTINGS_FILE.write_text(json.dumps(s))
+    except Exception:
+        pass
+
+_saved = _load_settings()
 
 app = FastAPI()
 
@@ -137,14 +171,22 @@ async def stream(ws: WebSocket):
         {"index": i + 1, "width": m["width"], "height": m["height"]}
         for i, m in enumerate(raw_mons)
     ]
+    state = {
+        "monitor":     _saved.get("monitor", 1),
+        "fps":         _saved.get("fps", 15),
+        "quality":     _saved.get("quality", 70),
+        "mouseMode":   _saved.get("mouseMode", "absolute"),
+        "sensitivity": _saved.get("sensitivity", 2.5),
+        "scrollSpeed": _saved.get("scrollSpeed", 3),
+    }
     await ws.send_text(json.dumps({
         "type": "info",
         "monitors": mons_info,
         "has_control": HAS_CONTROL,
+        "has_audio": HAS_AUDIO,
         "platform": PLATFORM,
+        "settings": dict(state),
     }))
-
-    state = {"monitor": 1, "fps": 15, "quality": 70}
     loop = asyncio.get_event_loop()
 
     async def send_frames():
@@ -162,9 +204,15 @@ async def stream(ws: WebSocket):
                 t = data.get("type", "settings")
 
                 if t == "settings":
-                    for k in ("monitor", "fps", "quality"):
+                    for k in ("monitor", "fps", "quality", "scrollSpeed"):
                         if k in data:
                             state[k] = int(data[k])
+                    if "sensitivity" in data:
+                        state["sensitivity"] = float(data["sensitivity"])
+                    if "mouseMode" in data:
+                        state["mouseMode"] = str(data["mouseMode"])
+                    _saved.update(state)
+                    _save_settings(_saved)
 
                 elif t == "mouse" and HAS_CONTROL:
                     rect = mon_rects.get(state["monitor"], mon_rects[1])
@@ -296,6 +344,46 @@ async def upload_file(file: UploadFile):
             pass
 
     return {"saved": dest.name, "in_clipboard": in_clipboard}
+
+
+@app.websocket("/audio")
+async def audio_stream(ws: WebSocket):
+    if not HAS_AUDIO:
+        await ws.close(code=4000)
+        return
+    if ACCESS_TOKEN:
+        if ws.query_params.get("token") != ACCESS_TOKEN:
+            await ws.close(code=4401)
+            return
+    await ws.accept()
+
+    RATE, CHUNK = 22050, 2048
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=12)
+
+    def _cb(indata, frames, t, status):
+        mono = indata.mean(axis=1).astype("float32").tobytes()
+        def _enq():
+            if not queue.full():
+                queue.put_nowait(mono)
+        loop.call_soon_threadsafe(_enq)
+
+    try:
+        stream = sd.InputStream(
+            samplerate=RATE, channels=2, dtype="float32",
+            device=_LOOPBACK_DEV, blocksize=CHUNK, callback=_cb,
+            extra_settings=sd.WasapiSettings(loopback=True),
+        )
+        stream.start()
+        try:
+            while True:
+                chunk = await queue.get()
+                await ws.send_bytes(chunk)
+        finally:
+            stream.stop()
+            stream.close()
+    except Exception as e:
+        print(f"audio: {e}")
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

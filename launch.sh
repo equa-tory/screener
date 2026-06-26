@@ -1,3 +1,3 @@
 #!/usr/bin/env sh
 cd "$(dirname "$0")"
-python3 server.py
+venv\bin\python3 server.py

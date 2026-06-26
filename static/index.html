@@ -153,7 +153,7 @@ textarea, input, [contenteditable] { -webkit-user-select: text; user-select: tex
 
 /* ── Scroll buttons ─────────────────────────────────── */
 #scroll-btns {
-  position: fixed; right: 12px; bottom: 80px; z-index: 8;
+  position: fixed; right: 12px; bottom: 120px; z-index: 8;
   display: flex; flex-direction: column; gap: 8px;
 }
 #scroll-btns.hidden { display: none; }
@@ -250,6 +250,7 @@ textarea, input, [contenteditable] { -webkit-user-select: text; user-select: tex
 <div id="bar">
   <div id="mons"></div>
   <div id="bar-right">
+    <button class="btn icon" id="audio-btn" title="Stream PC audio" style="display:none">🔇</button>
     <button class="btn icon" id="paste-btn" title="Paste to PC" style="display:none">📋</button>
     <button class="btn icon" id="kbd-btn" title="Keyboard" style="display:none">⌨</button>
     <button class="btn" id="ctrl-btn" style="display:none">Control</button>
@@ -318,8 +319,9 @@ let currentMon = 1;
 let ws = null, reconnectDelay = 1000, authFailed = false;
 let controlMode = false, mouseMode = 'absolute'; // 'absolute' | 'relative'
 let sensitivity = 2.5, scrollSpeed = 3;
-let hasControl = false, platform = 'win32';
+let hasControl = false, hasAudio = false, platform = 'win32';
 let settOpen = false, kbdActive = false;
+let kbdOffset = 0; // pixels keyboard pushes bar up
 let activeModifiers = new Set();
 let lastFrameAt = 0, fpsEma = 0;
 
@@ -338,7 +340,7 @@ const TOKEN = new URLSearchParams(location.search).get('token') || '';
 
 // ── Canvas sizing ─────────────────────────────────────────────────────────────
 function usableH() {
-  return canvas.height - bar.offsetHeight -
+  return canvas.height - bar.offsetHeight - kbdOffset -
          (modsEl.classList.contains('hidden') ? 0 : modsEl.offsetHeight);
 }
 
@@ -352,8 +354,20 @@ window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', () => setTimeout(resize, 120));
 resize();
 
+// Shift bar + mods above iOS software keyboard
+if (window.visualViewport) {
+  const onVV = () => {
+    const vv = window.visualViewport;
+    kbdOffset = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+    bar.style.bottom = kbdOffset ? kbdOffset + 'px' : '';
+    if (imgW) updateModRow(); else positionMods();
+  };
+  window.visualViewport.addEventListener('resize', onVV);
+  window.visualViewport.addEventListener('scroll', onVV);
+}
+
 function positionMods() {
-  modsEl.style.bottom = bar.offsetHeight + 'px';
+  modsEl.style.bottom = (bar.offsetHeight + kbdOffset) + 'px';
 }
 
 function resetFit() {
@@ -541,10 +555,12 @@ qR.addEventListener('input',   () => { qV.textContent   = qR.value;   send({type
 sensR.addEventListener('input', () => {
   sensitivity = +sensR.value;
   sensV.textContent = sensitivity.toFixed(1) + '×';
+  send({type:'settings', sensitivity});
 });
 document.getElementById('scroll-r').addEventListener('input', function() {
   scrollSpeed = +this.value;
   document.getElementById('scroll-v').textContent = scrollSpeed;
+  send({type:'settings', scrollSpeed});
 });
 
 // Mouse mode segment control
@@ -553,6 +569,7 @@ document.querySelectorAll('.seg-opt').forEach(btn => {
     mouseMode = btn.dataset.mode;
     document.querySelectorAll('.seg-opt').forEach(b => b.classList.toggle('active', b === btn));
     sensRow.style.display = mouseMode === 'relative' ? '' : 'none';
+    send({type:'settings', mouseMode});
   });
 });
 
@@ -703,6 +720,44 @@ scrollDnBtn.addEventListener('pointerdown', e => { e.stopPropagation(); startScr
   btn.addEventListener('pointercancel', stopScroll);
 });
 
+// ── Audio streaming ───────────────────────────────────────────────────────────
+let audioCtx = null, audioWs = null, audioNextTime = 0, audioOn = false;
+const AUDIO_RATE = 22050;
+const audioBtn = document.getElementById('audio-btn');
+
+function toggleAudio() {
+  audioOn = !audioOn;
+  audioBtn.textContent = audioOn ? '🔊' : '🔇';
+  audioBtn.classList.toggle('active', audioOn);
+  if (!audioOn) {
+    audioWs?.close(); audioWs = null;
+    audioCtx?.close(); audioCtx = null;
+    return;
+  }
+  audioCtx = new AudioContext({sampleRate: AUDIO_RATE});
+  audioNextTime = audioCtx.currentTime + 0.1;
+  const url = `ws://${location.host}/audio${TOKEN ? '?token='+encodeURIComponent(TOKEN) : ''}`;
+  audioWs = new WebSocket(url);
+  audioWs.binaryType = 'arraybuffer';
+  audioWs.onmessage = e => {
+    if (!audioCtx) return;
+    const pcm = new Float32Array(e.data);
+    const buf = audioCtx.createBuffer(1, pcm.length, AUDIO_RATE);
+    buf.copyToChannel(pcm, 0);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(audioCtx.destination);
+    const now = audioCtx.currentTime;
+    if (audioNextTime < now + 0.01) audioNextTime = now + 0.05;
+    src.start(audioNextTime);
+    audioNextTime += buf.duration;
+  };
+  audioWs.onclose = () => { if (audioOn) { audioOn = false; audioBtn.textContent = '🔇'; audioBtn.classList.remove('active'); } };
+}
+
+audioBtn.addEventListener('pointerdown', e => e.stopPropagation());
+audioBtn.addEventListener('click', toggleAudio);
+
 // ── File upload ───────────────────────────────────────────────────────────────
 const fileInput    = document.getElementById('file-input');
 const uploadStatus = document.getElementById('upload-status');
@@ -794,9 +849,35 @@ function connect() {
       const data = JSON.parse(e.data);
       if (data.type === 'info' && data.monitors.length) {
         hasControl = !!data.has_control;
+        hasAudio   = !!data.has_audio;
         platform   = data.platform || 'win32';
 
+        // Restore saved settings
+        if (data.settings) {
+          const s = data.settings;
+          if (s.monitor) currentMon = s.monitor;
+          if (s.fps != null)   { fpsR.value = s.fps;   fpsV.textContent = s.fps; }
+          if (s.quality != null) { qR.value = s.quality; qV.textContent = s.quality; }
+          if (s.mouseMode) {
+            mouseMode = s.mouseMode;
+            document.querySelectorAll('.seg-opt').forEach(b =>
+              b.classList.toggle('active', b.dataset.mode === mouseMode));
+            sensRow.style.display = mouseMode === 'relative' ? '' : 'none';
+          }
+          if (s.sensitivity != null) {
+            sensitivity = s.sensitivity;
+            sensR.value = s.sensitivity;
+            sensV.textContent = sensitivity.toFixed(1) + '×';
+          }
+          if (s.scrollSpeed != null) {
+            scrollSpeed = s.scrollSpeed;
+            document.getElementById('scroll-r').value = s.scrollSpeed;
+            document.getElementById('scroll-v').textContent = s.scrollSpeed;
+          }
+        }
+
         // Show/hide control UI
+        audioBtn.style.display = hasAudio   ? '' : 'none';
         ctrlBtn.style.display  = hasControl ? '' : 'none';
         kbdBtn.style.display   = hasControl ? '' : 'none';
         pasteBtn.style.display = hasControl ? '' : 'none';
