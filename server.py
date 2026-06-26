@@ -5,13 +5,15 @@ import os
 import secrets
 import socket
 import sys
+import shutil
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import mss
 from PIL import Image, ImageDraw
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, UploadFile
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
@@ -235,6 +237,32 @@ async def stream(ws: WebSocket):
         send_task.cancel()
         recv_task.cancel()
         await asyncio.gather(send_task, recv_task, return_exceptions=True)
+
+
+@app.post("/upload")
+async def upload_file(file: UploadFile):
+    desktop = Path.home() / "Desktop"
+    desktop.mkdir(exist_ok=True)
+    dest = desktop / (file.filename or "upload")
+    # Avoid overwriting existing files
+    stem, suffix = dest.stem, dest.suffix
+    n = 1
+    while dest.exists():
+        dest = desktop / f"{stem}_{n}{suffix}"
+        n += 1
+    with dest.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
+    # Open on PC so it's immediately accessible
+    try:
+        if PLATFORM == "win32":
+            os.startfile(dest)
+        elif PLATFORM == "darwin":
+            subprocess.run(["open", str(dest)])
+        else:
+            subprocess.run(["xdg-open", str(dest)])
+    except Exception:
+        pass
+    return {"saved": dest.name}
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

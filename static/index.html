@@ -148,6 +148,32 @@ canvas { display: block; touch-action: none; }
 #ov-title { font-size: 20px; font-weight: 600; }
 #ov-sub   { font-size: 13px; color: rgba(255,255,255,.4); text-align: center; padding: 0 20px; }
 
+/* ── Scroll buttons ─────────────────────────────────── */
+#scroll-btns {
+  position: fixed; right: 12px; bottom: 80px; z-index: 8;
+  display: flex; flex-direction: column; gap: 8px;
+}
+#scroll-btns.hidden { display: none; }
+.scroll-btn {
+  width: 46px; height: 46px; border-radius: 23px; font-size: 18px;
+  background: rgba(20,20,30,.82); color: #fff;
+  border: 1px solid rgba(255,255,255,.22); cursor: pointer;
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  -webkit-tap-highlight-color: transparent; user-select: none;
+  display: flex; align-items: center; justify-content: center;
+}
+.scroll-btn:active { background: rgba(0,100,200,.6); }
+
+/* ── File upload (inside paste modal) ───────────────── */
+#file-divider { color: #444; font-size: 12px; text-align: center; }
+#file-btn {
+  padding: 9px; background: rgba(255,255,255,.06); color: #888;
+  border: 1px dashed rgba(255,255,255,.2); border-radius: 8px;
+  font-size: 14px; cursor: pointer; width: 100%; text-align: center;
+}
+#file-btn:active { background: rgba(255,255,255,.12); }
+#upload-status { font-size: 13px; color: #0af; min-height: 18px; text-align: center; }
+
 /* ── Hidden keyboard input ──────────────────────────── */
 #kbd-input {
   position: fixed; top: -200px; left: 0; width: 1px; height: 1px; opacity: 0;
@@ -159,6 +185,12 @@ canvas { display: block; touch-action: none; }
 
 <canvas id="c"></canvas>
 <div id="ctrl-ring"></div>
+
+<!-- Scroll buttons (shown in control mode) -->
+<div id="scroll-btns" class="hidden">
+  <button class="scroll-btn" id="scroll-up">▲</button>
+  <button class="scroll-btn" id="scroll-dn">▼</button>
+</div>
 
 <!-- Settings panel (slides from top) -->
 <div id="settings">
@@ -211,10 +243,14 @@ canvas { display: block; touch-action: none; }
     <textarea id="paste-ta" placeholder="Paste here…"></textarea>
     <div id="paste-actions">
       <button id="paste-cancel">Cancel</button>
-      <button id="paste-send">Send to PC</button>
+      <button id="paste-send">Send text to PC</button>
     </div>
+    <div id="file-divider">— or send a file / photo —</div>
+    <button id="file-btn">📁 Choose file or photo</button>
+    <div id="upload-status"></div>
   </div>
 </div>
+<input type="file" id="file-input" style="display:none" accept="*/*">
 
 <!-- Connection overlay -->
 <div id="overlay">
@@ -412,27 +448,29 @@ canvas.addEventListener('pointermove', e => {
     const dist = Math.hypot(b.x - a.x, b.y - a.y);
     const mx = (a.x + b.x) / 2;
     const my = (a.y + b.y) / 2;
-    const distDelta = pinchDist > 0 ? Math.abs(dist - pinchDist) / pinchDist : 0;
+    // Per-frame absolute px delta — not cumulative ratio, avoids drift false-positives
+    const distDelta = pinchDist != null ? Math.abs(dist - pinchDist) : 999;
+    const scrollThresh = Math.max(10, (pinchDist || dist) * 0.06);
 
-    if (controlMode && distDelta < 0.04) {
-      // Two fingers moving together = scroll
+    if (controlMode && distDelta < scrollThresh) {
+      // Fingers moving together without spreading → scroll
       const midDy = my - pinchMidY;
-      const ticks = Math.round(-midDy / 28);
+      const ticks = Math.round(-midDy / 20);
       if (ticks !== 0) {
         const pos = canvasToMon(mx, my);
         send({type: 'mouse', action: 'scroll', dy: ticks, x: pos.x, y: pos.y});
       }
     } else {
-      // Pinch-to-zoom (both modes)
-      if (pinchDist && pinchDist > 0) {
+      // Pinch-to-zoom (both modes, both control states)
+      if (pinchDist != null && pinchDist > 0) {
         const ns = Math.max(fitScale, Math.min(12, scale * dist / pinchDist));
         tx = mx - (mx - tx) * (ns / scale);
         ty = my - (my - ty) * (ns / scale);
         scale = ns;
         clamp(); draw();
       }
-      pinchDist = dist;
     }
+    pinchDist = dist; // always update — next frame compares to this frame, not initial
     pinchMidX = mx; pinchMidY = my;
   }
 }, {passive: false});
@@ -526,7 +564,18 @@ function updateModRow() {
   const show = hasControl && (controlMode || kbdActive);
   modsEl.classList.toggle('hidden', !show);
   positionMods();
-  if (imgW) resetFit();
+  if (!imgW) return;
+  const prevFit = fitScale;
+  fitScale = Math.min(canvas.width / imgW, usableH() / imgH);
+  if (Math.abs(scale - prevFit) < 0.001) {
+    // Was at fit → snap to new fit height
+    scale = fitScale;
+    tx = (canvas.width - imgW * scale) / 2;
+    ty = (usableH() - imgH * scale) / 2;
+  } else {
+    clamp(); // Zoomed → just reclamp, keep zoom level
+  }
+  draw();
 }
 
 // ── Keyboard ──────────────────────────────────────────────────────────────────
@@ -601,10 +650,52 @@ function setControlMode(on) {
   ctrlBtn.textContent = on ? 'Control ON' : 'Control';
   ctrlRing.classList.toggle('on', on);
   canvas.style.cursor = on ? (mouseMode === 'relative' ? 'move' : 'crosshair') : 'grab';
+  document.getElementById('scroll-btns').classList.toggle('hidden', !on);
   updateModRow();
 }
 ctrlBtn.addEventListener('pointerdown', e => e.stopPropagation());
 ctrlBtn.addEventListener('click', () => setControlMode(!controlMode));
+
+// ── Scroll buttons (hold to repeat) ──────────────────────────────────────────
+let scrollInterval = null;
+
+function startScroll(dy) {
+  const doIt = () => send({type:'mouse', action:'scroll', dy});
+  doIt();
+  scrollInterval = setInterval(doIt, 110);
+}
+function stopScroll() { clearInterval(scrollInterval); scrollInterval = null; }
+
+const scrollUpBtn = document.getElementById('scroll-up');
+const scrollDnBtn = document.getElementById('scroll-dn');
+scrollUpBtn.addEventListener('pointerdown', e => { e.stopPropagation(); startScroll(3); });
+scrollDnBtn.addEventListener('pointerdown', e => { e.stopPropagation(); startScroll(-3); });
+[scrollUpBtn, scrollDnBtn].forEach(btn => {
+  btn.addEventListener('pointerup',    stopScroll);
+  btn.addEventListener('pointercancel', stopScroll);
+});
+
+// ── File upload ───────────────────────────────────────────────────────────────
+const fileInput    = document.getElementById('file-input');
+const uploadStatus = document.getElementById('upload-status');
+
+document.getElementById('file-btn').addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', async () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+  uploadStatus.textContent = `Uploading ${file.name}…`;
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const res = await fetch('/upload', {method: 'POST', body: fd});
+    const data = await res.json();
+    uploadStatus.textContent = `✓ Saved & opened: ${data.saved}`;
+    setTimeout(() => { uploadStatus.textContent = ''; }, 5000);
+  } catch (err) {
+    uploadStatus.textContent = 'Upload failed';
+  }
+  fileInput.value = '';
+});
 
 // ── Monitor buttons ───────────────────────────────────────────────────────────
 function buildMonitorBtns(monitors) {

@@ -3,3 +3,4 @@ uvicorn[standard]
 mss
 Pillow
 pyautogui
+python-multipart
