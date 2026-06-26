@@ -189,6 +189,16 @@ textarea, input, [contenteditable] { -webkit-user-select: text; user-select: tex
 #file-btn:active { background: rgba(255,255,255,.12); }
 #upload-status { font-size: 13px; color: #0af; min-height: 18px; text-align: center; }
 
+/* ── Motion alert banner ─────────────────────────────── */
+#motion-banner {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 60;
+  background: rgba(255,160,0,.95); color: #000;
+  padding: 14px 16px; font-size: 15px; font-weight: 600;
+  text-align: center; transform: translateY(-100%);
+  transition: transform .3s ease; cursor: pointer;
+}
+#motion-banner.show { transform: translateY(0); }
+
 /* ── Hidden keyboard input ──────────────────────────── */
 #kbd-input {
   position: fixed; top: -200px; left: 0; width: 1px; height: 1px; opacity: 0;
@@ -198,6 +208,7 @@ textarea, input, [contenteditable] { -webkit-user-select: text; user-select: tex
 </head>
 <body>
 
+<div id="motion-banner">Motion detected</div>
 <canvas id="c"></canvas>
 <div id="ctrl-ring"></div>
 
@@ -235,6 +246,15 @@ textarea, input, [contenteditable] { -webkit-user-select: text; user-select: tex
     <span class="slabel">Scroll</span>
     <input type="range" id="scroll-r" min="1" max="100" value="3">
     <span class="sval" id="scroll-v">3</span>
+  </div>
+  <div class="srow">
+    <span class="slabel">Motion</span>
+    <div class="seg">
+      <button class="seg-opt active" data-motion="off">Off</button>
+      <button class="seg-opt" data-motion="screen">Screen</button>
+      <button class="seg-opt" data-motion="input">Input</button>
+      <button class="seg-opt" data-motion="both">Both</button>
+    </div>
   </div>
   <div class="srow">
     <span class="slabel" style="color:#555">Stream</span>
@@ -758,6 +778,28 @@ function toggleAudio() {
 audioBtn.addEventListener('pointerdown', e => e.stopPropagation());
 audioBtn.addEventListener('click', toggleAudio);
 
+// ── Motion detection ──────────────────────────────────────────────────────────
+const motionBanner = document.getElementById('motion-banner');
+let motionTimer = null;
+
+motionBanner.addEventListener('click', () => motionBanner.classList.remove('show'));
+
+function showMotionAlert(source) {
+  motionBanner.textContent = source === 'input' ? '⌨ Input activity detected' : '👁 Screen changed';
+  motionBanner.classList.add('show');
+  clearTimeout(motionTimer);
+  motionTimer = setTimeout(() => motionBanner.classList.remove('show'), 4000);
+  navigator.vibrate && navigator.vibrate([100, 50, 100]);
+}
+
+document.querySelectorAll('[data-motion]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const val = btn.dataset.motion;
+    document.querySelectorAll('[data-motion]').forEach(b => b.classList.toggle('active', b === btn));
+    send({type: 'settings', motionDetect: val});
+  });
+});
+
 // ── File upload ───────────────────────────────────────────────────────────────
 const fileInput    = document.getElementById('file-input');
 const uploadStatus = document.getElementById('upload-status');
@@ -847,6 +889,7 @@ function connect() {
   ws.onmessage = async e => {
     if (typeof e.data === 'string') {
       const data = JSON.parse(e.data);
+      if (data.type === 'motion') { showMotionAlert(data.source); return; }
       if (data.type === 'info' && data.monitors.length) {
         hasControl = !!data.has_control;
         hasAudio   = !!data.has_audio;
@@ -873,6 +916,10 @@ function connect() {
             scrollSpeed = s.scrollSpeed;
             document.getElementById('scroll-r').value = s.scrollSpeed;
             document.getElementById('scroll-v').textContent = s.scrollSpeed;
+          }
+          if (s.motionDetect) {
+            document.querySelectorAll('[data-motion]').forEach(b =>
+              b.classList.toggle('active', b.dataset.motion === s.motionDetect));
           }
         }
 

@@ -1,4 +1,10 @@
 @echo off
 cd /d "%~dp0"
-venv\Scripts\python server.py
+if not exist venv (
+    echo Creating virtual environment...
+    python -m venv venv
+    echo Installing requirements...
+    venv\Scripts\pip install -r requirements.txt
+)
+venv\Scripts\python server.py %*
 pause

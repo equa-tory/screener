@@ -1,1 +1,1 @@
-{"monitor": 1, "fps": 5, "quality": 30, "mouseMode": "relative", "sensitivity": 2.5, "scrollSpeed": 100}
+{"monitor": 2, "fps": 5, "quality": 30, "mouseMode": "relative", "sensitivity": 2.5, "scrollSpeed": 100, "motionDetect": "off", "motionThreshold": 8}
